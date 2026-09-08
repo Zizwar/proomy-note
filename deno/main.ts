@@ -79,9 +79,21 @@ Deno.serve({ port: PORT }, async (req: Request) => {
     }
 
     // -------------------------------------------------------------
-    // Route: sitemap.xml & sitemap-index.xml (SEO Sitemap)
+    // Route: sitemap.xml & sitemap-index.xml (SEO Sitemap Index)
     // -------------------------------------------------------------
-    if ((path === "/sitemap.xml" || path === "/sitemap-unified.xml") && isGetOrHead) {
+    if ((path === "/sitemap.xml" || path === "/sitemap-index.xml") && isGetOrHead) {
+      const promptMetas = await getAllApprovedPromptMetas();
+      const indexXml = generateSitemapIndexXml(baseUrl, promptMetas.length, 5000);
+      return new Response(method === "HEAD" ? null : indexXml, {
+        headers: {
+          "Content-Type": "application/xml; charset=utf-8",
+          "Cache-Control": "public, max-age=3600",
+          ...corsHeaders,
+        },
+      });
+    }
+
+    if ((path === "/sitemap-all.xml" || path === "/sitemap-unified.xml") && isGetOrHead) {
       const now = Date.now();
       let sitemapXml = "";
       if (cachedUnifiedSitemap && now - cachedUnifiedSitemap.timestamp < SITEMAP_CACHE_TTL) {
@@ -96,18 +108,6 @@ Deno.serve({ port: PORT }, async (req: Request) => {
         headers: {
           "Content-Type": "application/xml; charset=utf-8",
           "Cache-Control": "public, max-age=3600, s-maxage=3600",
-          ...corsHeaders,
-        },
-      });
-    }
-
-    if (path === "/sitemap-index.xml" && isGetOrHead) {
-      const promptMetas = await getAllApprovedPromptMetas();
-      const indexXml = generateSitemapIndexXml(baseUrl, promptMetas.length, 5000);
-      return new Response(method === "HEAD" ? null : indexXml, {
-        headers: {
-          "Content-Type": "application/xml; charset=utf-8",
-          "Cache-Control": "public, max-age=3600",
           ...corsHeaders,
         },
       });

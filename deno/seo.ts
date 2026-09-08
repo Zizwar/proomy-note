@@ -18,12 +18,13 @@ Disallow: /api/seed
 # Search Engine Sitemaps
 Sitemap: ${baseUrl}/sitemap.xml
 Sitemap: ${baseUrl}/sitemap-main.xml
-Sitemap: ${baseUrl}/sitemap-prompts.xml
+Sitemap: ${baseUrl}/sitemap-prompts-1.xml
+Sitemap: ${baseUrl}/sitemap-prompts-2.xml
 `;
 }
 
 export function generateSitemapIndexXml(baseUrl = "https://vibenote.sbs", totalPrompts = 10000, chunkSize = 5000): string {
-  const now = new Date().toISOString();
+  const now = new Date().toISOString().split("T")[0];
   const chunkCount = Math.max(1, Math.ceil(totalPrompts / chunkSize));
   
   let sitemapsXml = `  <sitemap>
@@ -31,18 +32,11 @@ export function generateSitemapIndexXml(baseUrl = "https://vibenote.sbs", totalP
     <lastmod>${now}</lastmod>
   </sitemap>\n`;
 
-  if (chunkCount === 1) {
+  for (let i = 1; i <= chunkCount; i++) {
     sitemapsXml += `  <sitemap>
-    <loc>${baseUrl}/sitemap-prompts.xml</loc>
-    <lastmod>${now}</lastmod>
-  </sitemap>\n`;
-  } else {
-    for (let i = 1; i <= chunkCount; i++) {
-      sitemapsXml += `  <sitemap>
     <loc>${baseUrl}/sitemap-prompts-${i}.xml</loc>
     <lastmod>${now}</lastmod>
   </sitemap>\n`;
-    }
   }
 
   return `<?xml version="1.0" encoding="UTF-8"?>
