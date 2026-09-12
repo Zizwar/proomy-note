@@ -14,10 +14,17 @@ import {
   PromptDoc,
   PromptMeta
 } from "./db.ts";
-import { renderHomePage, renderPromptDetailPage, render404Page } from "./views/renderHtml.ts";
+import { renderHomePage, renderPromptDetailPage, render404Page, renderPendingPrivatePromptPage } from "./views/renderHtml.ts";
 import { renderAdminLoginPage, renderAdminDashboardPage } from "./views/renderAdmin.ts";
 import { checkAdminPassword, createAdminSession, clearAdminSession, isAdminAuthenticated } from "./adminAuth.ts";
 import { extractVariables } from "./variableParser.ts";
+import {
+  getClientIp,
+  checkPromptSubmissionLimit,
+  checkApiRateLimit,
+  checkStatsRateLimit,
+  validatePromptPayload,
+} from "./rateLimiter.ts";
 import {
   generateRobotsTxt,
   generateUnifiedSitemapXml,
@@ -64,6 +71,30 @@ Deno.serve({ port: PORT }, async (req: Request) => {
   const isGetOrHead = method === "GET" || method === "HEAD";
 
   try {
+    // -------------------------------------------------------------
+    // Global API Rate Limiting (Server Anti-Flood Protection)
+    // -------------------------------------------------------------
+    if (path.startsWith("/api/") && !path.startsWith("/api/admin/")) {
+      const clientIp = getClientIp(req);
+      const apiLimit = checkApiRateLimit(clientIp);
+      if (!apiLimit.allowed) {
+        return new Response(
+          JSON.stringify({
+            error: "API rate limit exceeded. Server flood protection active.",
+            retryAfter: apiLimit.resetSeconds,
+          }),
+          {
+            status: 429,
+            headers: {
+              "Content-Type": "application/json",
+              "Retry-After": String(apiLimit.resetSeconds),
+              ...corsHeaders,
+            },
+          }
+        );
+      }
+    }
+
     // -------------------------------------------------------------
     // Route: robots.txt (Essential for Search Engine Crawlers)
     // -------------------------------------------------------------
@@ -357,6 +388,34 @@ Deno.serve({ port: PORT }, async (req: Request) => {
         return new Response("Prompt not found", { status: 404, headers: corsHeaders });
       }
 
+      const isAdmin = isAdminAuthenticated(req);
+      const isApproved = (prompt.status === 'approved' || (!prompt.status && prompt.isPublic !== false)) && prompt.visibility !== 'private';
+
+      // Security & Visibility check: If prompt is pending / private and user is not admin
+      if (!isApproved && !isAdmin) {
+        const acceptHeader = (req.headers.get("accept") || "").toLowerCase();
+        if (acceptHeader.includes("text/html")) {
+          const pendingHtml = renderPendingPrivatePromptPage(prompt, baseUrl);
+          return new Response(method === "HEAD" ? null : pendingHtml, {
+            status: 403,
+            headers: {
+              "Content-Type": "text/html; charset=utf-8",
+              "Cache-Control": "no-store, no-cache, must-revalidate",
+              ...corsHeaders,
+            },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            error: "This prompt is private and pending administrator review.",
+            shortId: prompt.shortId,
+            status: prompt.status || "pending",
+            visibility: prompt.visibility || "private",
+          }),
+          { status: 403, headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders } }
+        );
+      }
+
       const formatType = (url.searchParams.get("type") || url.searchParams.get("format") || "").toLowerCase();
       const acceptHeader = (req.headers.get("accept") || "").toLowerCase();
       const isBrowserNav = acceptHeader.includes("text/html") && !formatType;
@@ -426,39 +485,87 @@ ${prompt.content}
       }
 
       // Default: HTML Web Page
-      const html = renderPromptDetailPage(prompt, baseUrl);
+      const html = renderPromptDetailPage(prompt, baseUrl, isAdmin);
       return new Response(method === "HEAD" ? null : html, {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "public, max-age=300, s-maxage=600",
+          "Cache-Control": isApproved ? "public, max-age=300, s-maxage=600" : "no-store, no-cache",
           ...corsHeaders,
         },
       });
     }
 
     // -------------------------------------------------------------
-    // Route 4: API Create / Share Prompt
+    // Route 4: API Create / Share Prompt (With Anti-Flood & Privacy)
     // -------------------------------------------------------------
     if (path === "/api/prompts" && method === "POST") {
-      const body = await req.json();
-      const content = body.content || "";
+      const clientIp = getClientIp(req);
 
-      // Auto-extract variables if not provided
+      // 1. Anti-Flood Rate Limit Check (max 5 per 10 mins per IP)
+      const subLimit = checkPromptSubmissionLimit(clientIp);
+      if (!subLimit.allowed) {
+        return new Response(
+          JSON.stringify({
+            error: subLimit.error || "Too many prompt submissions. Anti-flood protection active.",
+            retryAfter: subLimit.resetSeconds,
+          }),
+          {
+            status: 429,
+            headers: {
+              "Content-Type": "application/json",
+              "Retry-After": String(subLimit.resetSeconds),
+              ...corsHeaders,
+            },
+          }
+        );
+      }
+
+      // 2. Request body size check (max 64KB)
+      const contentLength = Number(req.headers.get("content-length")) || 0;
+      if (contentLength > 65536) {
+        return new Response(
+          JSON.stringify({ error: "Payload too large. Maximum allowed size is 64KB." }),
+          { status: 413, headers: { "Content-Type": "application/json", ...corsHeaders } }
+        );
+      }
+
+      let body: any;
+      try {
+        body = await req.json();
+      } catch {
+        return new Response(
+          JSON.stringify({ error: "Invalid JSON body provided." }),
+          { status: 400, headers: { "Content-Type": "application/json", ...corsHeaders } }
+        );
+      }
+
+      // 3. Strict Payload Validation
+      const validation = validatePromptPayload(body);
+      if (!validation.valid || !validation.data) {
+        return new Response(
+          JSON.stringify({ error: validation.error || "Prompt validation failed." }),
+          { status: 400, headers: { "Content-Type": "application/json", ...corsHeaders } }
+        );
+      }
+
+      const validData = validation.data;
+      const content = validData.content;
       const variables = (Array.isArray(body.variables) && body.variables.length > 0)
         ? body.variables
         : extractVariables(content);
 
-      // Public submissions get status: 'pending' (requires admin review)
+      // Public submissions are ALWAYS private and pending review
       const saved = await savePrompt({
-        title: body.title || "Untitled Prompt",
-        kind: body.kind || "prompt",
+        title: validData.title,
+        kind: validData.kind,
         content: content,
-        description: body.description || "",
-        category: body.category || "other",
-        platform: body.platform || "chatgpt",
-        tags: Array.isArray(body.tags) ? body.tags : [],
+        description: validData.description,
+        category: validData.category,
+        platform: validData.platform,
+        tags: validData.tags,
         variables: variables,
         status: "pending",
+        visibility: "private",
         isPublic: false,
       });
 
@@ -469,8 +576,14 @@ ${prompt.content}
           success: true,
           shortId: saved.shortId,
           shortUrl: shortUrl,
-          message: "Prompt submitted for admin review!",
-          prompt: saved,
+          message: "Prompt submitted for admin review! It is saved as private until activated.",
+          prompt: {
+            shortId: saved.shortId,
+            title: saved.title,
+            status: saved.status,
+            visibility: saved.visibility,
+            createdAt: saved.createdAt,
+          },
         }),
         {
           headers: { "Content-Type": "application/json", ...corsHeaders },
@@ -508,15 +621,40 @@ ${prompt.content}
           headers: { "Content-Type": "application/json", ...corsHeaders },
         });
       }
+
+      const isAdmin = isAdminAuthenticated(req);
+      const isApproved = (prompt.status === 'approved' || (!prompt.status && prompt.isPublic !== false)) && prompt.visibility !== 'private';
+
+      if (!isApproved && !isAdmin) {
+        return new Response(
+          JSON.stringify({
+            error: "This prompt is private and pending administrator review.",
+            shortId: prompt.shortId,
+            status: prompt.status || "pending",
+            visibility: prompt.visibility || "private",
+          }),
+          { status: 403, headers: { "Content-Type": "application/json", ...corsHeaders } }
+        );
+      }
+
       return new Response(method === "HEAD" ? null : JSON.stringify(prompt), {
         headers: { "Content-Type": "application/json", ...corsHeaders },
       });
     }
 
     // -------------------------------------------------------------
-    // Route 7: Incremental Stats
+    // Route 7: Incremental Stats (Rate-limited)
     // -------------------------------------------------------------
     if (path.match(/^\/api\/prompts\/[a-zA-Z0-9_-]+\/stats$/) && method === "POST") {
+      const clientIp = getClientIp(req);
+      const statLimit = checkStatsRateLimit(clientIp);
+      if (!statLimit.allowed) {
+        return new Response(JSON.stringify({ error: "Too many stats requests" }), {
+          status: 429,
+          headers: { "Content-Type": "application/json", ...corsHeaders }
+        });
+      }
+
       const shortId = path.split("/")[3];
       const body = await req.json().catch(() => ({}));
       const type = body.type === "copy" ? "copy" : "view";

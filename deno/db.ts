@@ -22,6 +22,7 @@ export interface PromptDoc {
   variables: VariableDefinition[];
   isPublic: boolean;
   status?: 'approved' | 'pending' | 'rejected';
+  visibility?: 'public' | 'private' | 'unlisted';
   views: number;
   copies: number;
   createdAt: string;
@@ -215,7 +216,7 @@ export async function getPublicPrompts(options?: {
 
   if (!useFallbackDb && mongoCollection) {
     try {
-      const query: any = { isPublic: true, status: { $ne: 'pending' } };
+      const query: any = { isPublic: true, status: { $nin: ['pending', 'rejected'] }, visibility: { $ne: 'private' } };
       if (category && category !== 'all') {
         query.category = category;
       }
@@ -242,7 +243,7 @@ export async function getPublicPrompts(options?: {
         const categorySamples = await Promise.all(
           categories.map(cat =>
             mongoCollection!.aggregate<PromptDoc>([
-              { $match: { isPublic: true, category: cat } },
+              { $match: { isPublic: true, status: { $nin: ['pending', 'rejected'] }, visibility: { $ne: 'private' }, category: cat } },
               { $sample: { size: perCat } }
             ]).toArray()
           )
@@ -272,7 +273,7 @@ export async function getPublicPrompts(options?: {
   // Fallback DB read
   try {
     let list = await loadLocalPrompts();
-    list = list.filter(p => p.isPublic !== false && p.status !== 'pending' && p.status !== 'rejected');
+    list = list.filter(p => p.isPublic !== false && p.status !== 'pending' && p.status !== 'rejected' && p.visibility !== 'private');
     if (category && category !== 'all') {
       list = list.filter(p => p.category === category);
     }
@@ -346,6 +347,11 @@ export async function savePrompt(promptData: Partial<PromptDoc>): Promise<Prompt
   const shortId = promptData.shortId || generateShortId();
   const now = new Date().toISOString();
 
+  const status = promptData.status || 'pending';
+  const isApproved = status === 'approved';
+  const visibility = promptData.visibility || (isApproved ? 'public' : 'private');
+  const isPublic = isApproved && visibility === 'public';
+
   const doc: PromptDoc = {
     shortId,
     kind: promptData.kind || "prompt",
@@ -356,8 +362,9 @@ export async function savePrompt(promptData: Partial<PromptDoc>): Promise<Prompt
     platform: promptData.platform || "other",
     tags: Array.isArray(promptData.tags) ? promptData.tags : [],
     variables: Array.isArray(promptData.variables) ? promptData.variables : [],
-    isPublic: promptData.status ? promptData.status === 'approved' : (promptData.isPublic !== false),
-    status: promptData.status || (promptData.isPublic === false ? 'pending' : 'pending'),
+    isPublic,
+    status,
+    visibility,
     views: promptData.views || 0,
     copies: promptData.copies || 0,
     createdAt: promptData.createdAt || now,
@@ -513,10 +520,13 @@ export async function getAdminAllPrompts(options?: {
 }
 
 export async function updatePromptStatus(shortId: string, status: 'approved' | 'pending' | 'rejected'): Promise<boolean> {
+  const isApproved = status === 'approved';
+  const visibility = isApproved ? 'public' : 'private';
+  const isPublic = isApproved;
+
   if (!useFallbackDb && mongoCollection) {
     try {
-      const isPublic = status === 'approved';
-      await mongoCollection.updateOne({ shortId }, { $set: { status, isPublic, updatedAt: new Date().toISOString() } });
+      await mongoCollection.updateOne({ shortId }, { $set: { status, isPublic, visibility, updatedAt: new Date().toISOString() } });
       return true;
     } catch (e) {
       console.error("MongoDB updatePromptStatus error:", e);
@@ -529,7 +539,8 @@ export async function updatePromptStatus(shortId: string, status: 'approved' | '
     const p = list.find(x => x.shortId === shortId);
     if (p) {
       p.status = status;
-      p.isPublic = status === 'approved';
+      p.isPublic = isPublic;
+      p.visibility = visibility;
       p.updatedAt = new Date().toISOString();
       await Deno.writeTextFile(LOCAL_DB_PATH, JSON.stringify(list, null, 2));
       return true;
@@ -572,7 +583,7 @@ export async function getAllApprovedPromptMetas(): Promise<PromptMeta[]> {
     try {
       const docs = await mongoCollection
         .find(
-          { isPublic: true, status: { $ne: 'pending' } },
+          { isPublic: true, status: { $nin: ['pending', 'rejected'] }, visibility: { $ne: 'private' } },
           { projection: { shortId: 1, title: 1, category: 1, description: 1, createdAt: 1, updatedAt: 1 } }
         )
         .sort({ createdAt: -1 })
@@ -593,7 +604,7 @@ export async function getAllApprovedPromptMetas(): Promise<PromptMeta[]> {
   try {
     const list = await loadLocalPrompts();
     return list
-      .filter(p => p.isPublic !== false && p.status !== 'pending' && p.status !== 'rejected')
+      .filter(p => p.isPublic !== false && p.status !== 'pending' && p.status !== 'rejected' && p.visibility !== 'private')
       .map(p => ({
         shortId: p.shortId,
         title: p.title,
@@ -611,7 +622,7 @@ export async function getLatestApprovedPrompts(limit = 50): Promise<PromptDoc[]>
   if (!useFallbackDb && mongoCollection) {
     try {
       return await mongoCollection
-        .find({ isPublic: true, status: { $ne: 'pending' } })
+        .find({ isPublic: true, status: { $nin: ['pending', 'rejected'] }, visibility: { $ne: 'private' } })
         .sort({ createdAt: -1 })
         .limit(limit)
         .toArray();
@@ -623,7 +634,7 @@ export async function getLatestApprovedPrompts(limit = 50): Promise<PromptDoc[]>
   try {
     const list = await loadLocalPrompts();
     return list
-      .filter(p => p.isPublic !== false && p.status !== 'pending' && p.status !== 'rejected')
+      .filter(p => p.isPublic !== false && p.status !== 'pending' && p.status !== 'rejected' && p.visibility !== 'private')
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
       .slice(0, limit);
   } catch {

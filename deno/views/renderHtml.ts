@@ -91,6 +91,7 @@ export function renderHomePage(
   <meta name="description" content="${escapeHtml(pageDesc)}">
   <meta name="keywords" content="AI prompts, prompt engineering, ChatGPT prompts, Midjourney prompts, Claude prompts, Gemini prompts, AI prompt generator, Vibe Note">
   <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+  <meta name="google-adsense-account" content="ca-pub-5448783245957365">
   <link rel="canonical" href="${canonicalUrl}">
   <link rel="alternate" type="application/rss+xml" title="Vibe Note - Latest Prompts" href="${baseUrl}/feed.xml">
   <link rel="sitemap" type="application/xml" title="Sitemap" href="${baseUrl}/sitemap.xml">
@@ -267,9 +268,13 @@ export function renderHomePage(
             <label>Tags (comma separated)</label>
             <input type="text" id="pTags" placeholder="e.g. typescript, clean-code">
           </div>
-          <div class="modal-footer">
+          <div class="submit-privacy-notice" style="margin-top: 14px; font-size: 0.82rem; color: var(--text-muted); display: flex; align-items: center; gap: 8px; background: rgba(245, 158, 11, 0.08); padding: 8px 12px; border-radius: 8px; border: 1px solid rgba(245, 158, 11, 0.2);">
+            <i class="fa-solid fa-shield-halved" style="color: #fbbf24;"></i>
+            <span>البرومبتات الجديدة تُحفظ كخاصة (Private) لحماية السيرفر من الإغراق وتتطلب تفعيل الإدارة قبل الظهور للعامة.</span>
+          </div>
+          <div class="modal-footer" style="margin-top: 14px;">
             <button type="button" class="btn btn-secondary" onclick="closeCreateModal()">Cancel</button>
-            <button type="submit" class="btn btn-primary">Publish</button>
+            <button type="submit" class="btn btn-primary"><i class="fa-solid fa-paper-plane"></i> Submit for Review</button>
           </div>
         </form>
       </div>
@@ -303,7 +308,7 @@ export function renderHomePage(
 </html>`;
 }
 
-export function renderPromptDetailPage(prompt: PromptDoc, baseUrl = "https://vibenote.sbs"): string {
+export function renderPromptDetailPage(prompt: PromptDoc, baseUrl = "https://vibenote.sbs", isAdmin = false): string {
   const shortUrl = `${baseUrl}/p/${prompt.shortId}`;
   const jsonUrl = `${shortUrl}?type=json`;
   const mdUrl = `${shortUrl}?type=md`;
@@ -383,6 +388,7 @@ export function renderPromptDetailPage(prompt: PromptDoc, baseUrl = "https://vib
   <meta name="description" content="${escapeHtml(promptDescription)}">
   <meta name="keywords" content="${prompt.tags.join(', ')}, ${prompt.category}, ${prompt.platform}, AI Prompt, Vibe Note">
   <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+  <meta name="google-adsense-account" content="ca-pub-5448783245957365">
   <link rel="canonical" href="${shortUrl}">
   <link rel="alternate" type="application/json" href="${jsonUrl}">
   <link rel="alternate" type="text/markdown" href="${mdUrl}">
@@ -441,6 +447,31 @@ export function renderPromptDetailPage(prompt: PromptDoc, baseUrl = "https://vib
     </header>
 
     <main class="container detail-container">
+      ${isAdmin && (prompt.status === 'pending' || prompt.visibility === 'private' || !prompt.isPublic) ? `
+        <div class="admin-review-banner" style="background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.4); padding: 14px 18px; border-radius: 12px; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+          <div>
+            <span style="color: #fbbf24; font-weight: 700;"><i class="fa-solid fa-triangle-exclamation"></i> Admin Review Mode:</span>
+            <span style="color: #e5e7eb; font-size: 0.9rem; margin-left: 6px;">This prompt is <strong>PRIVATE</strong> (pending approval) and hidden from the public.</span>
+          </div>
+          <button onclick="approveCurrentPrompt('${prompt.shortId}')" class="btn btn-success btn-small">
+            <i class="fa-solid fa-check"></i> Approve & Publish Live
+          </button>
+        </div>
+        <script>
+          async function approveCurrentPrompt(id) {
+            if (!confirm("Approve this prompt and make it public for everyone?")) return;
+            try {
+              const res = await fetch('/api/admin/approve/' + id, { method: 'POST' });
+              if (res.ok) {
+                alert("Prompt approved and published!");
+                window.location.reload();
+              } else {
+                alert("Failed to approve prompt.");
+              }
+            } catch(e) { alert("Error: " + e.message); }
+          }
+        </script>
+      ` : ''}
       <!-- Prompt Header Banner -->
       <div class="detail-header-card">
         <div class="detail-badges">
@@ -1082,6 +1113,14 @@ function getClientScripts(baseUrl: string): string {
 
     async function submitPrompt(e) {
       e.preventDefault();
+      const form = document.getElementById("createForm");
+      const btn = form?.querySelector('button[type="submit"]');
+      const originalText = btn ? btn.innerHTML : 'Submit for Review';
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Submitting...';
+      }
+
       const title = document.getElementById("pTitle").value.trim();
       const category = document.getElementById("pCategory").value;
       const platform = document.getElementById("pPlatform").value;
@@ -1093,19 +1132,82 @@ function getClientScripts(baseUrl: string): string {
         const res = await fetch('/api/prompts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title, category, platform, description, content, tags, isPublic: true })
+          body: JSON.stringify({ title, category, platform, description, content, tags })
         });
         const data = await res.json();
-        if (data.shortId) {
-          window.location.href = '/p/' + data.shortId;
+        if (res.ok && data.success) {
+          closeCreateModal();
+          form?.reset();
+          showToast("🎉 تم إرسال البرومبت بنجاح! تم حفظه كخاص (Private) وقيد المراجعة لحماية المنصة من الإغراق.");
+        } else if (res.status === 429) {
+          alert("⚠️ تم تجاوز الحد المسموح للإرسال لحماية السيرفر:\n" + (data.error || "يرجى الانتظار بضع دقائق قبل إرسال برومبت جديد."));
         } else {
-          alert('Failed to publish prompt');
+          alert(data.error || 'Failed to submit prompt');
         }
       } catch (err) {
-        alert('Error publishing prompt: ' + err.message);
+        alert('Error submitting prompt: ' + err.message);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = originalText;
+        }
       }
     }
   `;
+}
+
+export function renderPendingPrivatePromptPage(prompt: PromptDoc, baseUrl = "https://vibenote.sbs"): string {
+  return `<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Private Prompt — Pending Review | Vibe Note</title>
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="google-adsense-account" content="ca-pub-5448783245957365">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Outfit:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <style>
+    ${getGlobalStyles()}
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <header class="navbar">
+      <div class="container nav-container">
+        <a href="/" class="brand-logo">
+          <div class="logo-icon"><i class="fa-solid fa-bolt"></i></div>
+          <span class="brand-name">Vibe<span class="gradient-text">Note</span></span>
+        </a>
+        <div class="nav-actions">
+          <a href="/" class="btn btn-primary btn-compact"><i class="fa-solid fa-house"></i> Home</a>
+        </div>
+      </div>
+    </header>
+    <main class="container text-center" style="padding: 90px 20px; flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; max-width: 640px; margin: 0 auto;">
+      <div style="width: 76px; height: 76px; border-radius: 50%; background: rgba(245, 158, 11, 0.12); border: 2px solid rgba(245, 158, 11, 0.35); display: flex; align-items: center; justify-content: center; margin-bottom: 22px; color: #fbbf24; font-size: 2.2rem;">
+        <i class="fa-solid fa-lock"></i>
+      </div>
+      <h1 style="font-size: 2rem; margin-bottom: 14px; font-weight: 700;">Prompt is Private & Pending Review</h1>
+      <p style="color: var(--text-muted); font-size: 1.05rem; line-height: 1.7; margin-bottom: 24px;">
+        هذا البرومبت محفوظ كخاص (Private) وقيد مراجعة وتفعيل الإدارة لحماية المنصة من الإغراق والسبام. سيظهر في المعرض العام فور اعتماده.
+      </p>
+      <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; padding: 14px 20px; margin-bottom: 28px; width: 100%; text-align: left; display: flex; align-items: center; gap: 12px;">
+        <i class="fa-solid fa-shield-halved" style="color: var(--accent-cyan); font-size: 1.3rem;"></i>
+        <div style="font-size: 0.95rem; color: var(--text-muted);">
+          Status: <strong style="color: #fbbf24;">Pending Approval (Private)</strong> &bull; ID: <code>${prompt.shortId}</code>
+        </div>
+      </div>
+      <div style="display: flex; gap: 12px; justify-content: center; flex-wrap: wrap;">
+        <a href="/" class="btn btn-primary"><i class="fa-solid fa-arrow-left"></i> Explore Public Prompts</a>
+        <a href="/admin" class="btn btn-secondary"><i class="fa-solid fa-shield-halved"></i> Admin Login</a>
+      </div>
+    </main>
+  </div>
+</body>
+</html>`;
 }
 
 export function render404Page(baseUrl = "https://vibenote.sbs"): string {
@@ -1116,6 +1218,7 @@ export function render404Page(baseUrl = "https://vibenote.sbs"): string {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>404 — Page Not Found | Vibe Note</title>
   <meta name="robots" content="noindex, follow">
+  <meta name="google-adsense-account" content="ca-pub-5448783245957365">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Outfit:wght@600;700;800&display=swap" rel="stylesheet">
